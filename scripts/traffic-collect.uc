@@ -1,11 +1,13 @@
 #!/usr/bin/ucode
 // Per-client traffic accounting for https://ROUTER_IP/traffic.html
-// cron runs this every 5 min: reads the nft counter sets (/etc/nftables.d/20-traffic-acct.nft),
+// cron runs this every minute: reads the nft counter sets (/etc/nftables.d/20-traffic-acct.nft),
 // adds the growth since the last run to per-MAC totals and daily history.
-// Written to RAM every run; to flash once a day at 03:00 and on "flush" (before reboots).
+// Written to RAM every run; to flash once a day (first run after 03:00) and on "flush" (before reboots).
+// Manufacturer names come from /etc/traffic-vendors.json (filled by /etc/traffic-vendors.uc).
 import * as fs from 'fs';
 
 const RAM = '/tmp/traffic.json', FLASH = '/etc/traffic-totals.json', NAMES = '/etc/traffic-names.json';
+const VENDORS = '/etc/traffic-vendors.json';
 const KINDS = ['out_down', 'out_up', 'in_down', 'in_up'];
 const KEEP_DAYS = 62;
 
@@ -74,10 +76,15 @@ for (let mac, c in db.clients)
 		if (d < cutoff) delete c.days[d];
 
 db.names = load(NAMES) ?? {};
+db.vendors = load(VENDORS) ?? {};
 db.updated = now;
 db.boot = boot;
+
+// runs every minute, so remember the day of the last daily flash write instead of matching a time window
+let daily = localtime(now).hour == 3 && db.flashed != today;
+if (daily)
+	db.flashed = today;
 save(RAM, db);
 
-let t = localtime(now);
-if (ARGV[0] == 'flush' || !fs.stat(FLASH) || (t.hour == 3 && t.min < 5))
+if (ARGV[0] == 'flush' || !fs.stat(FLASH) || daily)
 	save(FLASH, db);
