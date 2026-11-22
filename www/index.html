@@ -73,6 +73,9 @@ table.clients { width: 100%; border-collapse: collapse; min-width: 720px; }
 .clients tbody tr[aria-selected="true"] { box-shadow: inset 3px 0 0 var(--ink); }
 .name { font-weight: 600; }
 .mac { color: var(--ink-2); font-size: 12px; font-family: ui-monospace, Consolas, monospace; }
+.vendor { color: var(--ink-2); font-size: 12px; }
+.makers { color: var(--ink-2); font-size: 13px; margin: -6px 0 8px; }
+.makers:empty { display: none; }
 .mini { display: flex; gap: 2px; height: 6px; width: 120px; margin-left: auto; margin-top: 4px; }
 .mini span { border-radius: 2px; min-width: 0; }
 .legend { display: flex; flex-wrap: wrap; gap: 14px; color: var(--ink-2); font-size: 12px; margin-bottom: 8px; }
@@ -150,6 +153,7 @@ dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
   <div class="tiles" id="tiles"></div>
   <div class="card">
     <h2>By client</h2>
+    <div class="makers" id="makers"></div>
     <div class="tbl-wrap"><table class="clients">
       <thead><tr>
         <th>Client</th><th>IP</th><th>Last active</th>
@@ -157,7 +161,7 @@ dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
       </tr></thead>
       <tbody id="rows"></tbody>
     </table></div>
-    <div class="note">Click a client to show its daily history below. Internet = outside your home; Home = devices on 192.168.1.x, including the main router.</div>
+    <div class="note">Click a client to show its daily history below. Internet = outside your home; Home = devices on 192.168.1.x, including the main router. Makers come from the IEEE registry of MAC prefixes.</div>
   </div>
   <div class="card">
     <h2 id="chart-title">Daily traffic, last 30 days</h2>
@@ -241,6 +245,23 @@ window.addEventListener('hashchange', route);
   const ago = t => { const s = Date.now() / 1000 - t; if (s < 600) return 'now'; if (s < 3600) return Math.round(s / 60) + ' min ago'; if (s < 86400) return Math.round(s / 3600) + ' h ago'; return Math.round(s / 86400) + ' d ago'; };
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+  // Who made each device, from its MAC prefix: the router looks prefixes up in the IEEE registry
+  // (/etc/traffic-vendors.uc, hourly). A set "locally administered" bit means the device randomized its MAC,
+  // as phones and laptops do for privacy, so there is no maker to look up.
+  const CORP = /\b(co|ltd|inc|corp|corporation|limited|llc|gmbh|technologies|technology|electronics|semiconductor|communications?)\b\.?/gi;
+  function maker(mac) {
+    const h = mac.replace(/[^0-9a-f]/gi, '').toUpperCase();
+    if (h.length !== 12) return { kind: 'unknown', label: '' };
+    if (parseInt(h.slice(0, 2), 16) & 2) return { kind: 'private', label: 'Private address (randomized by the device)' };
+    const V = data.vendors || {}, k = [9, 7, 6].map(n => h.slice(0, n)).find(p => p in V);
+    if (k === undefined) return { kind: 'pending', label: '' };
+    if (!V[k]) return { kind: 'unknown', label: 'Unknown maker' };
+    const full = V[k].replace(/,(?=\S)/g, ', ');
+    const short = full.replace(CORP, '').replace(/^(beijing|shenzhen|guangdong|guangzhou|hangzhou|shanghai|zhejiang|dongguan|xiamen)\s+/i, '')
+      .replace(/[\s,.]+/g, ' ').trim();
+    return { kind: 'maker', label: full, short: short || full };
+  }
+
   function sumFor(c) {
     const t = { out_down: 0, out_up: 0, in_down: 0, in_up: 0 };
     if (range === 0) { for (const s of SERIES) t[s.key] = c.total[s.key] || 0; return t; }
@@ -257,13 +278,25 @@ window.addEventListener('hashchange', route);
     clients.forEach(x => SERIES.forEach(s => all[s.key] += x.t[s.key]));
     document.getElementById('tiles').innerHTML = SERIES.map(s =>
       `<div class="tile"><div class="k"><i class="sw" style="background:${s.color}"></i>${s.label}</div><div class="v num">${fmt(all[s.key])}</div></div>`).join('');
+    const makers = new Map(); let priv = 0, unknown = 0, pending = 0;
+    clients.forEach(x => {
+      const m = maker(x.mac);
+      if (m.kind === 'maker') makers.set(m.short, (makers.get(m.short) || 0) + 1);
+      else if (m.kind === 'private') priv++; else if (m.kind === 'pending') pending++; else unknown++;
+    });
+    const parts = [...makers].map(([n, c]) => c > 1 ? `${n} ×${c}` : n);
+    if (priv) parts.push(`${priv} private address${priv > 1 ? 'es' : ''}`);
+    if (unknown) parts.push(`${unknown} unknown`);
+    if (pending) parts.push(`${pending} not looked up yet`);
+    document.getElementById('makers').textContent =
+      clients.length ? `${clients.length} device${clients.length > 1 ? 's' : ''}: ${parts.join(' · ')}` : '';
     const rows = document.getElementById('rows');
-    if (!clients.length) rows.innerHTML = '<tr><td colspan="8" class="empty">No client traffic recorded yet. Data appears within 5 minutes of a client using the network.</td></tr>';
+    if (!clients.length) rows.innerHTML = '<tr><td colspan="8" class="empty">No client traffic recorded yet. Data appears within a minute of a client using the network.</td></tr>';
     else rows.innerHTML = clients.map(x => {
-      const name = (data.names || {})[x.mac];
+      const name = (data.names || {})[x.mac], m = maker(x.mac);
       const mini = x.total ? SERIES.map(s => x.t[s.key] ? `<span style="flex:${x.t[s.key]};background:${s.color}"></span>` : '').join('') : '';
       return `<tr data-mac="${esc(x.mac)}" aria-selected="${x.mac === selected}">
-        <td>${name ? `<div class="name">${esc(name)}</div>` : ''}<div class="mac">${esc(x.mac)}</div></td>
+        <td>${name ? `<div class="name">${esc(name)}</div>` : ''}<div class="mac">${esc(x.mac)}</div>${m.label ? `<div class="vendor">${esc(m.label)}</div>` : ''}</td>
         <td class="num">${esc(x.c.ip || '')}</td><td>${x.c.last_seen ? ago(x.c.last_seen) : ''}</td>
         ${SERIES.map(s => `<td class="num">${fmt(x.t[s.key])}</td>`).join('')}
         <td class="num"><b>${fmt(x.total)}</b><div class="mini">${mini}</div></td></tr>`;
@@ -294,25 +327,35 @@ window.addEventListener('hashchange', route);
     for (let v = 0; v <= top + 1e-9; v += nice)
       g += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="${v === 0 ? 'var(--axis)' : 'var(--grid)'}" stroke-width="1"/>` +
            `<text x="${L - 8}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="var(--muted)">${fmt(v)}</text>`;
+    // Segments sit edge to edge on whole pixels, so no background shows between them. Amounts too small to see
+    // at this scale (KBs on a GB chart) are left out of the bar but stay in the tooltip; a day that has only
+    // such amounts gets a 2 px stub so it doesn't look empty.
+    let hl = '', bars = '', hits = '';
+    const y0 = Math.round(y(0));
     vals.forEach((v, i) => {
       const x = L + i * slot + (slot - bw) / 2;
-      let base = 0; const segs = SERIES.filter(s => v[s.key] > 0);
-      segs.forEach((s, j) => {
-        const y0 = y(base), y1 = y(base + v[s.key]); base += v[s.key];
-        const h = Math.max(1, y0 - y1 - (j < segs.length - 1 ? 2 : 0));
-        const r = Math.min(4, h, bw / 2);
-        g += j === segs.length - 1
-          ? `<path d="M${x},${y0} V${y0 - h + r} Q${x},${y0 - h} ${x + r},${y0 - h} H${x + bw - r} Q${x + bw},${y0 - h} ${x + bw},${y0 - h + r} V${y0} Z" fill="${s.color}"/>`
-          : `<rect x="${x}" y="${y0 - h}" width="${bw}" height="${h}" fill="${s.color}"/>`;
+      let sum = 0, prev = y0;
+      let segs = SERIES.map(s => { sum += v[s.key]; const hi = Math.round(y(sum)); const p = { s, lo: prev, hi }; prev = hi; return p; })
+        .filter(p => p.hi < p.lo);
+      if (!segs.length && v.total > 0)
+        segs = [{ s: SERIES.reduce((a, s) => v[s.key] > v[a.key] ? s : a), lo: y0, hi: y0 - 2 }];
+      segs.forEach((p, j) => {
+        if (j < segs.length - 1) { bars += `<rect x="${x}" y="${p.hi}" width="${bw}" height="${p.lo - p.hi}" fill="${p.s.color}"/>`; return; }
+        const r = Math.min(4, p.lo - p.hi, bw / 2);   // rounded top on the topmost segment only
+        bars += `<path d="M${x},${p.lo} V${p.hi + r} Q${x},${p.hi} ${x + r},${p.hi} H${x + bw - r} Q${x + bw},${p.hi} ${x + bw},${p.hi + r} V${p.lo} Z" fill="${p.s.color}"/>`;
       });
       if (i % 5 === 4 || i === days.length - 1)
         g += `<text x="${x + bw / 2}" y="${H - 6}" text-anchor="middle" font-size="11" fill="var(--muted)">${v.d.slice(8)}/${v.d.slice(5, 7)}</text>`;
-      g += `<rect class="hit" data-i="${i}" x="${L + i * slot}" y="${T}" width="${slot}" height="${H - T - B}" fill="transparent"/>`;
+      // hover highlight goes behind the bars so it never tints them; the invisible hit area goes on top
+      hl += `<rect class="hl" x="${L + i * slot}" y="${T}" width="${slot}" height="${H - T - B}" fill="transparent"/>`;
+      hits += `<rect class="hit" data-i="${i}" x="${L + i * slot}" y="${T}" width="${slot}" height="${H - T - B}" fill="transparent"/>`;
     });
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-    svg.innerHTML = g;
+    svg.innerHTML = hl + g + bars + hits;
     const tip = document.getElementById('tip'), box = document.getElementById('chart');
+    const hls = svg.querySelectorAll('.hl');
     svg.querySelectorAll('.hit').forEach(r => {
+      const hl = hls[+r.dataset.i];
       r.onmousemove = e => {
         const v = vals[+r.dataset.i];
         tip.innerHTML = `<div style="font-weight:600;margin-bottom:4px">${v.d}</div>` +
@@ -322,9 +365,9 @@ window.addEventListener('hashchange', route);
         const b = box.getBoundingClientRect(); let lx = e.clientX - b.left + 12;
         if (lx + tip.offsetWidth > b.width) lx = e.clientX - b.left - tip.offsetWidth - 12;
         tip.style.left = lx + 'px'; tip.style.top = Math.max(0, e.clientY - b.top - tip.offsetHeight / 2) + 'px';
-        r.setAttribute('fill', 'var(--hover)');
+        hl.setAttribute('fill', 'var(--hover)');
       };
-      r.onmouseleave = () => { tip.style.display = 'none'; r.setAttribute('fill', 'transparent'); };
+      r.onmouseleave = () => { tip.style.display = 'none'; hl.setAttribute('fill', 'transparent'); };
     });
   }
 
@@ -339,18 +382,21 @@ window.addEventListener('hashchange', route);
   async function load() {
     try {
       const r = await fetch('/cgi-bin/traffic-data', { cache: 'no-store' });
-      data = await r.json();
+      const d = await r.json();
+      const fresh = !data || d.updated !== data.updated;
+      data = d;
       if (!data.clients) data.clients = {};
       const since = data.since ? new Date(data.since * 1000).toLocaleDateString() : '?';
       document.getElementById('t-status').textContent =
-        `Counting since ${since} · updated ${data.updated ? new Date(data.updated * 1000).toLocaleTimeString() : '?'} · refreshes every minute`;
-      render();
+        `Counting since ${since} · updated ${data.updated ? new Date(data.updated * 1000).toLocaleTimeString() : '?'} · updates every minute`;
+      if (fresh) render();
     } catch (e) {
       document.getElementById('t-status').textContent = 'Could not load data from the router.';
     }
   }
-  onShow.traffic = () => data ? drawChart() : load();
-  setInterval(() => !document.getElementById('traffic').hidden && load(), 60000);
+  onShow.traffic = () => { if (data) drawChart(); load(); };
+  // The router adds up the counters every minute (cron); checking every 15 s shows each update soon after it lands.
+  setInterval(() => !document.getElementById('traffic').hidden && load(), 15000);
 })();
 
 /* ---------- car wi-fi ---------- */
